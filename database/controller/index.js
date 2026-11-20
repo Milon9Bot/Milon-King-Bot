@@ -94,8 +94,10 @@ module.exports = async function (api) {
 			break;
 	}
 
-	const threadsData = await require("./threadsData.js")(databaseType, threadModel, api, fakeGraphql);
-	const usersData = await require("./usersData.js")(databaseType, userModel, api, fakeGraphql);
+	const [threadsData, usersData] = await Promise.all([
+		require("./threadsData.js")(databaseType, threadModel, api, fakeGraphql),
+		require("./usersData.js")(databaseType, userModel, api, fakeGraphql)
+	]);
 	const dashBoardData = await require("./dashBoardData.js")(databaseType, dashBoardModel, fakeGraphql);
 	const globalData = await require("./globalData.js")(databaseType, globalModel, fakeGraphql);
 

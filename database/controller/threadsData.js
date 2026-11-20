@@ -2,7 +2,7 @@ const { existsSync, writeJsonSync, readJSONSync } = require("fs-extra");
 const moment = require("moment-timezone");
 const path = require("path");
 const _ = require("lodash");
-const { CustomError, TaskQueue, getType } = global.utils;
+const { CustomError, TaskQueue, getType, log } = global.utils;
 
 const optionsWriteJSON = {
 	spaces: 2,
@@ -35,7 +35,9 @@ module.exports = async function (databaseType, threadModel, api, fakeGraphql) {
 	switch (databaseType) {
 		case "mongodb": {
 			// delete keys '_id' and '__v' in all threads
+			const _t0 = Date.now();
 			Threads = (await threadModel.find({}).lean()).map(thread => _.omit(thread, ["_id", "__v"]));
+			log.info("DATABASE_LOAD", `threadsData: ${Date.now() - _t0}ms, ${Threads.length} documents`);
 			break;
 		}
 		case "sqlite": {
@@ -191,14 +193,28 @@ module.exports = async function (databaseType, threadModel, api, fakeGraphql) {
 						message: `The first argument (threadID) must be a number, not a ${typeof threadID}`
 					});
 				}
-				threadInfo = threadInfo || await api.getThreadInfo(threadID);
+				threadInfo = threadInfo || await Promise.race([
+					api.getThreadInfo(threadID),
+					new Promise((_r, reject) =>
+						setTimeout(() => reject(new CustomError({
+							name: "GET_THREAD_INFO_TIMEOUT",
+							message: `api.getThreadInfo(${threadID}) did not resolve within 20s`
+						})), 20000)
+					)
+				]);
+				if (!threadInfo) {
+					throw new CustomError({
+						name: "GET_THREAD_INFO_EMPTY",
+						message: `api.getThreadInfo(${threadID}) returned no data`
+					});
+				}
 				const { threadName, userInfo, adminIDs } = threadInfo;
-				const newAdminsIDs = adminIDs.reduce(function (_, b) {
+				const newAdminsIDs = (adminIDs || []).reduce(function (_, b) {
 					_.push(b.id);
 					return _;
 				}, []);
 
-				const newMembers = userInfo.reduce(function (arr, user) {
+				const newMembers = (userInfo || []).reduce(function (arr, user) {
 					const userID = user.id;
 					arr.push({
 						userID,

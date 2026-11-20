@@ -1,4 +1,5 @@
 const fs = require("fs-extra");
+const path = require("path");
 const nullAndUndefined = [undefined, null];
 // const { config } = global.GoatBot;
 // const { utils } = global;
@@ -161,26 +162,70 @@ module.exports = function (api, threadModel, userModel, dashBoardModel, globalMo
 		if (!userData && !isNaN(senderID))
 			userData = await usersData.create(senderID);
 
-		if (!threadData && !isNaN(threadID)) {
-			if (global.temp.createThreadDataError.includes(threadID))
-				return;
-			threadData = await threadsData.create(threadID);
-			global.db.receivedTheFirstMessage[threadID] = true;
+		// E2EE threads aren't queryable via getThreadInfo/Graph API — that's
+		// what was hanging command processing forever. Skip DB thread
+		// creation for them and use safe defaults instead (same pattern as
+		// ST-BOT's working E2EE implementation).
+		if (event.isE2EE) {
+			if (!threadData)
+				threadData = { settings: {}, data: {}, adminIDs: [], members: [], banned: { status: false } };
+			if (!userData)
+				userData = { userID: senderID, name: "", exp: 0, money: 0, banned: { status: false }, settings: {}, data: {} };
 		}
 		else {
-			if (
-				autoRefreshThreadInfoFirstTime === true
-				&& !global.db.receivedTheFirstMessage[threadID]
-			) {
+			if (!threadData && !isNaN(threadID)) {
+				if (global.temp.createThreadDataError.includes(threadID))
+					return;
+				threadData = await threadsData.create(threadID);
 				global.db.receivedTheFirstMessage[threadID] = true;
-				await threadsData.refreshInfo(threadID);
+			}
+			else {
+				if (
+					autoRefreshThreadInfoFirstTime === true
+					&& !global.db.receivedTheFirstMessage[threadID]
+				) {
+					global.db.receivedTheFirstMessage[threadID] = true;
+					await threadsData.refreshInfo(threadID);
+				}
 			}
 		}
 
 		if (typeof threadData.settings.hideNotiMessage == "object")
 			hideNotiMessage = threadData.settings.hideNotiMessage;
 
-		const prefix = getPrefix(threadID);
+		// Mark the incoming message as read/seen before the bot replies —
+		// a real client always does this, and a bot account that only ever
+		// sends outbound messages and never sends read receipts is an easy
+		// behavioral signal for automation detection. Fire-and-forget so it
+		// never adds latency to the actual reply; skipped for E2EE threads
+		// since markAsRead isn't meaningful there. Respects the existing
+		// `autoseen` on/off toggle (scripts/cmds/autoseen.js).
+		if (!event.isE2EE && event.type !== "typ" && event.type !== "presence" && typeof api.markAsRead === "function") {
+			try {
+				const autoseenPath = path.join(__dirname, "..", "..", "scripts/cmds/cache/autoseen.json");
+				const autoseenOn = !fs.existsSync(autoseenPath) || (fs.readJsonSync(autoseenPath, { throws: false }) || { status: true }).status !== false;
+				if (autoseenOn) {
+					api.markAsRead(threadID).catch(() => {});
+				}
+			} catch { }
+		}
+
+		// Same idea as markAsRead above, but for the "delivered" receipt —
+		// a real client sends both automatically. Also fire-and-forget,
+		// also invisible/instant, no user-facing delay either way.
+		if (!event.isE2EE && event.type !== "typ" && event.type !== "presence" && threadID && event.messageID && typeof api.markAsDelivered === "function") {
+			try {
+				Promise.resolve(api.markAsDelivered(threadID, event.messageID)).catch(() => {});
+			} catch { }
+		}
+
+		// Typing indicator for plain chat is intentionally not shown here —
+		// only commands get a typing indicator, driven by fca's humanizer
+		// middleware for the exact reaction-delay window before this
+		// handler even runs. Showing typing on every ordinary message
+		// (like two friends chatting) doesn't read as natural.
+
+		const prefix = event.isE2EE ? config.prefix : getPrefix(threadID);
 		const role = getRole(threadData, senderID);
 		const parameters = {
 			api, usersData, threadsData, message, event,
@@ -213,10 +258,31 @@ module.exports = function (api, threadModel, userModel, dashBoardModel, globalMo
 		let isUserCallCommand = false;
 		async function onStart() {
 			// —————————————— CHECK USE BOT —————————————— //
-			if (!body || !body.startsWith(prefix))
+			if (!body) return;
+
+			// ══════════ NO PREFIX SYSTEM ══════════
+			const noPrefixEnable = global.GoatBot.config.noPrefix?.enable === true;
+			const isAdminBot = (global.GoatBot.config.adminBot || []).includes(senderID);
+
+			let usedPrefix = prefix;
+			let bodyToParse = body;
+
+			if (body.startsWith(prefix)) {
+				bodyToParse = body;
+				usedPrefix = prefix;
+			} else if (noPrefixEnable && isAdminBot) {
+				const possibleCmd = body.trim().split(/ +/)[0].toLowerCase();
+				const cmdExists = GoatBot.commands.has(possibleCmd) || GoatBot.commands.has(GoatBot.aliases.get(possibleCmd));
+				if (!cmdExists) return;
+				usedPrefix = "";
+				bodyToParse = body;
+			} else {
 				return;
+			}
+			// ═════════════════════════════════════
+
 			const dateNow = Date.now();
-			const args = body.slice(prefix.length).trim().split(/ +/);
+			const args = bodyToParse.slice(usedPrefix.length).trim().split(/ +/);
 			// ————————————  CHECK HAS COMMAND ——————————— //
 			let commandName = args.shift().toLowerCase();
 			let command = GoatBot.commands.get(commandName) || GoatBot.commands.get(GoatBot.aliases.get(commandName));
@@ -244,21 +310,38 @@ module.exports = function (api, threadModel, userModel, dashBoardModel, globalMo
 					return body_.replace(new RegExp(`^${prefix_}(\\s+|)${commandName_}`, "i"), "").trim();
 				}
 				else {
-					return body.replace(new RegExp(`^${prefix}(\\s+|)${commandName}`, "i"), "").trim();
+					return body.replace(new RegExp(`^${usedPrefix}(\\s+|)${commandName}`, "i"), "").trim();
 				}
 			}
 			// —————  CHECK BANNED OR ONLY ADMIN BOX  ————— //
 			if (isBannedOrOnlyAdmin(userData, threadData, senderID, threadID, isGroup, commandName, message, langCode))
 				return;
-			if (!command)
-				if (!hideNotiMessage.commandNotFound)
+				if (!command) {
+				if (!hideNotiMessage.commandNotFound && (!commandName || commandName.trim() === ""))
+					return await message.reply(utils.getText({ lang: langCode, head: "handlerEvents" }, "prefixOnly", prefix));
+				if (!hideNotiMessage.commandNotFound && commandName) {
+					const input = commandName.toLowerCase();
+					const allCommands = Array.from(GoatBot.commands.keys());
+					function levenDist(a, b) {
+						const m = a.length, n = b.length;
+						const dp = Array.from({length: m+1}, (_, i) => Array.from({length: n+1}, (_, j) => i||j));
+						for (let i = 1; i <= m; i++) for (let j = 1; j <= n; j++)
+							dp[i][j] = a[i-1] === b[j-1] ? dp[i-1][j-1] : 1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]);
+						return dp[m][n];
+					}
+					const scored = allCommands.map(cmd => {
+						const c = cmd.toLowerCase();
+						const substringBonus = input.includes(c) || c.includes(input) ? -100 : 0;
+						return { cmd, score: levenDist(input, c) + substringBonus };
+					});
+					scored.sort((a, b) => a.score - b.score);
+					const bestScore = scored[0].score;
+					const top = scored.filter(s => s.score <= bestScore + 1).slice(0, 3).map(s => `› ${prefix}${s.cmd}`);
 					return await message.reply(
-						commandName ?
-							utils.getText({ lang: langCode, head: "handlerEvents" }, "commandNotFound", commandName, prefix) :
-							utils.getText({ lang: langCode, head: "handlerEvents" }, "commandNotFound2", prefix)
+						utils.getText({ lang: langCode, head: "handlerEvents" }, "commandNotFoundSuggestion", top.join("\n"), prefix)
 					);
-				else
-					return true;
+				} else return true;
+			}
 			// ————————————— CHECK PERMISSION ———————————— //
 			const roleConfig = getRoleConfig(utils, command, isGroup, threadData, commandName);
 			const needRole = roleConfig.onStart;
@@ -342,6 +425,17 @@ module.exports = function (api, threadModel, userModel, dashBoardModel, globalMo
 				const getText2 = createGetText2(langCode, `${process.cwd()}/languages/cmds/${langCode}.js`, prefix, command);
 				const time = getTime("DD/MM/YYYY HH:mm:ss");
 				createMessageSyntaxError(commandName);
+
+				if (typeof command.onChat != "function") {
+					// A single broken command must not abort the whole onChat
+					// chain for every message.
+					if (!global.GoatBot._onChatBrokenLogged) global.GoatBot._onChatBrokenLogged = new Set();
+					if (!global.GoatBot._onChatBrokenLogged.has(commandName)) {
+						global.GoatBot._onChatBrokenLogged.add(commandName);
+						log.err("ON CHAT", `command "${commandName}" registered onChat but exports no onChat function — skipping`);
+					}
+					continue;
+				}
 
 				if (getType(command.onChat) == "Function") {
 					const defaultOnChat = command.onChat;

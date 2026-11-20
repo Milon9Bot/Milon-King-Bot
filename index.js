@@ -21,7 +21,7 @@ const { spawn } = require("child_process");
 const log = require("./logger/log.js");
 
 function startProject() {
-	const child = spawn("node", ["Goat.js"], {
+	const child = spawn("node", ["Milon.js"], {
 		cwd: __dirname,
 		stdio: "inherit",
 		shell: true
@@ -36,3 +36,14 @@ function startProject() {
 }
 
 startProject();
+const express = require('express');
+const app = express();
+
+app.get('/', (req, res) => {
+  res.send('Bot is running!');
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Uptime server running on port ${PORT}`);
+});

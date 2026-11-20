@@ -8,7 +8,10 @@ module.exports = async function (usersData, threadsData, event) {
 	const senderID = event.senderID || event.author || event.userID;
 
 	// ———————————— CHECK THREAD DATA ———————————— //
-	if (threadID) {
+	// E2EE threads are not queryable via the normal getThreadInfo/Graph API
+	// path — that's what was hanging. Skip DB thread-creation for them;
+	// handlerEvents.js supplies a safe default threadData object instead.
+	if (threadID && !event.isE2EE) {
 		try {
 			if (global.temp.createThreadDataError.includes(threadID))
 				return;

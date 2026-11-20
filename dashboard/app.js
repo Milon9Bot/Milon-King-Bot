@@ -52,15 +52,21 @@ module.exports = async (api) => {
 	const OAuth2 = google.auth.OAuth2;
 	const OAuth2_client = new OAuth2(clientId, clientSecret);
 	OAuth2_client.setCredentials({ refresh_token: refreshToken });
-	let accessToken;
+	let accessToken = null;
 	try {
-		accessToken = await OAuth2_client.getAccessToken();
+		const tokenRes = await OAuth2_client.getAccessToken();
+		accessToken = tokenRes && tokenRes.token ? tokenRes.token : null;
 	}
 	catch (err) {
-		throw new Error(getText("Goat", "googleApiRefreshTokenExpired"));
+		// Email verification is optional — don't kill the whole dashboard
+		// when the gmail OAuth refresh token is missing/expired (the default
+		// config ships a blank one).
+		accessToken = null;
 	}
+	if (!accessToken)
+		console.log("DASHBOARD: gmail OAuth unavailable — email verification codes will not be sent");
 
-	const transporter = nodemailer.createTransport({
+	const transporter = accessToken ? nodemailer.createTransport({
 		host: "smtp.gmail.com",
 		service: "Gmail",
 		auth: {
@@ -71,7 +77,13 @@ module.exports = async (api) => {
 			refreshToken,
 			accessToken
 		}
-	});
+	}) : {
+		// Stub: keep routes from crashing on null when gmail OAuth is
+		// not configured — sendMail rejects with a clear message instead.
+		sendMail: async () => {
+			throw new Error("Email service unavailable: gmail OAuth refresh token is not configured");
+		}
+	};
 
 
 	const {
@@ -205,7 +217,7 @@ module.exports = async (api) => {
 	app.get("/stats", async (req, res) => {
 		let fcaVersion;
 		try {
-			fcaVersion = require("mr-juwel-fca/package.json").version;
+			fcaVersion = require("neokex-fca/package.json").version;
 		}
 		catch (e) {
 			fcaVersion = "unknown";

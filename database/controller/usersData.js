@@ -3,7 +3,7 @@ const moment = require("moment-timezone");
 const path = require("path");
 const axios = require("axios");
 const _ = require("lodash");
-const { CustomError, TaskQueue, getType } = global.utils;
+const { CustomError, TaskQueue, getType, log } = global.utils;
 
 const optionsWriteJSON = {
 	spaces: 2,
@@ -36,7 +36,9 @@ module.exports = async function (databaseType, userModel, api, fakeGraphql) {
 	switch (databaseType) {
 		case "mongodb": {
 			// delete keys '_id' and '__v' in all users
+			const _t0 = Date.now();
 			Users = (await userModel.find({}).lean()).map(user => _.omit(user, ["_id", "__v"]));
+			log.info("DATABASE_LOAD", `usersData: ${Date.now() - _t0}ms, ${Users.length} documents`);
 			break;
 		}
 		case "sqlite": {
