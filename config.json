@@ -29,7 +29,7 @@
     "enable": false,
     "ignoreCommand": []
   },
-  "adminBot": [],
+  "adminBot": [61595491395431],
   "reactUnsend": {
     "enable": true,
     "onlyAdmin": true,
